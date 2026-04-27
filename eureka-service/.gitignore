@@ -13,6 +13,7 @@ target/
 .springBeans
 .sts4-cache
 
+
 ### IntelliJ IDEA ###
 .idea
 *.iws
@@ -34,3 +35,6 @@ build/
 .gitattributes
 mvnw
 mvnw.cmd
+
+# Application properties — contains sensitive credentials (DB, JWT, OAuth secrets)
+**/application.properties
