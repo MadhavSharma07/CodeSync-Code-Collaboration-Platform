@@ -1,0 +1,293 @@
+package com.authservice.codesync;
+
+import com.authservice.codesync.controller.AuthResource;
+import com.authservice.codesync.entity.User;
+import com.authservice.codesync.repository.UserRepository;
+import com.authservice.codesync.security.JwtTokenProvider;
+import com.authservice.codesync.service.AuthService;
+import com.authservice.codesync.service.AuthServiceImpl;
+import com.authservice.codesync.service.TokenBlacklistService;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.*;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.crypto.password.PasswordEncoder;
+
+import java.util.Map;
+import java.util.Optional;
+
+import static org.assertj.core.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class AuthServiceImplTest {
+
+    // ── Service-layer mocks (injected into AuthServiceImpl) ───────────────────
+    @Mock UserRepository        userRepository;
+    @Mock PasswordEncoder       passwordEncoder;
+    @Mock JwtTokenProvider      jwtTokenProvider;
+    @Mock AuthenticationManager authenticationManager;
+    @Mock TokenBlacklistService blacklistService;
+
+    // AuthServiceImpl is wired manually in setUp() to guarantee the correct
+    // mocks are injected. Using @InjectMocks alongside duplicate same-type
+    // @Mock fields (jwtTokenProvider vs jwtTokenProviderMock, blacklistService
+    // vs blacklistServiceMock) causes Mockito to pick arbitrarily, so the
+    // stubs in tests end up on the wrong instance and are never triggered.
+    AuthServiceImpl authService;
+
+    // ── Controller-layer mocks (injected into AuthResource) ──────────────────
+    @Mock AuthService           authServiceMock;
+    @Mock JwtTokenProvider      jwtTokenProviderMock;
+    @Mock TokenBlacklistService blacklistServiceMock;
+
+    private AuthResource authResource;
+    private User         sampleUser;
+
+    @BeforeEach
+    void setUp() {
+        // Explicit constructor wiring — eliminates ambiguity from having two
+        // @Mock fields of the same type (JwtTokenProvider, TokenBlacklistService)
+        authService = new AuthServiceImpl(
+                userRepository, passwordEncoder, jwtTokenProvider,
+                authenticationManager, blacklistService);
+
+        sampleUser = User.builder()
+                .userId(1L)
+                .username("alice")
+                .email("alice@example.com")
+                .passwordHash("$2a$12$hashed")
+                .role(User.Role.DEVELOPER)
+                .provider(User.AuthProvider.LOCAL)
+                .isActive(true)
+                .build();
+
+        authResource = new AuthResource(authServiceMock, jwtTokenProviderMock, blacklistServiceMock);
+    }
+
+    // =========================================================================
+    // AuthServiceImpl — register
+    // =========================================================================
+
+    @Nested
+    @DisplayName("AuthServiceImpl — register")
+    class RegisterServiceTests {
+
+        @Test
+        @DisplayName("register success — saves user, never calls JwtTokenProvider")
+        void register_success_noTokenGenerated() {
+            when(userRepository.existsByEmail(anyString())).thenReturn(false);
+            when(userRepository.existsByUsername(anyString())).thenReturn(false);
+            when(passwordEncoder.encode(anyString())).thenReturn("$2a$12$hashed");
+            when(userRepository.save(any(User.class))).thenReturn(sampleUser);
+
+            User result = authService.register("alice", "alice@example.com", "password123", "Alice");
+
+            assertThat(result.getUsername()).isEqualTo("alice");
+            verify(userRepository).save(any(User.class));
+            verifyNoInteractions(jwtTokenProvider);
+        }
+
+        @Test
+        @DisplayName("register throws when email already in use")
+        void register_throwsWhenEmailTaken() {
+            when(userRepository.existsByEmail("alice@example.com")).thenReturn(true);
+
+            assertThatThrownBy(() ->
+                    authService.register("alice", "alice@example.com", "password123", "Alice"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Email already in use");
+        }
+
+        @Test
+        @DisplayName("register throws when username already taken")
+        void register_throwsWhenUsernameTaken() {
+            when(userRepository.existsByEmail(anyString())).thenReturn(false);
+            when(userRepository.existsByUsername("alice")).thenReturn(true);
+
+            assertThatThrownBy(() ->
+                    authService.register("alice", "alice@example.com", "password123", "Alice"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Username already taken");
+        }
+    }
+
+    // =========================================================================
+    // POST /register — controller must return NO tokens
+    // =========================================================================
+
+    @Nested
+    @DisplayName("POST /api/v1/auth/register — no tokens in response")
+    class RegisterEndpointTests {
+
+        @Test
+        @DisplayName("register returns 201 with user data but NO accessToken or refreshToken")
+        @SuppressWarnings("unchecked")
+        void register_returns201_noTokens() {
+            when(authServiceMock.register(anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(sampleUser);
+
+            AuthResource.RegisterBody body =
+                    new AuthResource.RegisterBody("alice", "alice@example.com", "password123", "Alice");
+
+            ResponseEntity<?> response = authResource.register(body);
+
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+
+            Map<String, Object> body2 = (Map<String, Object>) response.getBody();
+            assertThat(body2).isNotNull();
+            assertThat(body2).containsKey("user");
+            assertThat(body2).containsKey("message");
+            assertThat(body2).doesNotContainKey("accessToken");
+            assertThat(body2).doesNotContainKey("refreshToken");
+            assertThat(body2).doesNotContainKey("tokenType");
+
+            verifyNoInteractions(jwtTokenProviderMock);
+        }
+
+        @Test
+        @DisplayName("register response message directs user to login")
+        @SuppressWarnings("unchecked")
+        void register_messageDirectsToLogin() {
+            when(authServiceMock.register(anyString(), anyString(), anyString(), anyString()))
+                    .thenReturn(sampleUser);
+
+            AuthResource.RegisterBody body =
+                    new AuthResource.RegisterBody("alice", "alice@example.com", "password123", "Alice");
+
+            ResponseEntity<?> response = authResource.register(body);
+            Map<String, Object> body2 = (Map<String, Object>) response.getBody();
+
+            assertThat(body2).isNotNull();
+            assertThat(body2.get("message").toString()).containsIgnoringCase("login");
+        }
+    }
+
+    // =========================================================================
+    // POST /login — controller MUST return tokens
+    // =========================================================================
+
+    @Nested
+    @DisplayName("POST /api/v1/auth/login — tokens present in response")
+    class LoginEndpointTests {
+
+        @Test
+        @DisplayName("login returns 200 with accessToken AND refreshToken")
+        @SuppressWarnings("unchecked")
+        void login_returns200WithBothTokens() {
+            when(authServiceMock.login("alice@example.com", "password123"))
+                    .thenReturn("mock-access-token");
+            when(authServiceMock.getUserByEmail("alice@example.com"))
+                    .thenReturn(Optional.of(sampleUser));
+            when(jwtTokenProviderMock.generateRefreshToken(any()))
+                    .thenReturn("mock-refresh-token");
+
+            AuthResource.LoginBody body =
+                    new AuthResource.LoginBody("alice@example.com", "password123");
+
+            ResponseEntity<?> response = authResource.login(body);
+
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+
+            Map<String, Object> body2 = (Map<String, Object>) response.getBody();
+            assertThat(body2).isNotNull();
+            assertThat(body2).containsKey("accessToken");
+            assertThat(body2).containsKey("refreshToken");
+            assertThat(body2).containsKey("tokenType");
+            assertThat(body2).containsKey("user");
+            assertThat(body2.get("accessToken")).isEqualTo("mock-access-token");
+            assertThat(body2.get("refreshToken")).isEqualTo("mock-refresh-token");
+            assertThat(body2.get("tokenType")).isEqualTo("Bearer");
+        }
+    }
+
+    // =========================================================================
+    // AuthServiceImpl — changePassword
+    // =========================================================================
+
+    @Nested
+    @DisplayName("AuthServiceImpl — changePassword")
+    class ChangePasswordTests {
+
+        @Test
+        @DisplayName("throws for OAuth user")
+        void changePassword_throwsForOAuthUser() {
+            sampleUser.setProvider(User.AuthProvider.GITHUB);
+            when(userRepository.findByUserId(1L)).thenReturn(Optional.of(sampleUser));
+
+            assertThatThrownBy(() -> authService.changePassword(1L, "old", "newpassword"))
+                    .isInstanceOf(IllegalStateException.class);
+        }
+
+        @Test
+        @DisplayName("throws when current password is wrong")
+        void changePassword_throwsWhenCurrentPasswordWrong() {
+            when(userRepository.findByUserId(1L)).thenReturn(Optional.of(sampleUser));
+            when(passwordEncoder.matches("wrong", sampleUser.getPasswordHash())).thenReturn(false);
+
+            assertThatThrownBy(() -> authService.changePassword(1L, "wrong", "newpassword"))
+                    .isInstanceOf(BadCredentialsException.class);
+        }
+    }
+
+    // =========================================================================
+    // AuthServiceImpl — account lifecycle
+    // =========================================================================
+
+    @Nested
+    @DisplayName("AuthServiceImpl — account lifecycle")
+    class AccountLifecycleTests {
+
+        @Test
+        @DisplayName("deactivateAccount sets isActive to false and clears Redis activity key")
+        void deactivateAccount_setsActiveFalse() {
+            when(userRepository.findByUserId(1L)).thenReturn(Optional.of(sampleUser));
+            when(userRepository.save(any(User.class))).thenReturn(sampleUser);
+
+            authService.deactivateAccount(1L);
+
+            assertThat(sampleUser.isActive()).isFalse();
+            verify(userRepository).save(sampleUser);
+            // Confirm inactivity key is cleared when account is deactivated
+            verify(blacklistService).clearActivity(1L);
+        }
+
+        @Test
+        @DisplayName("getUserByEmail returns the correct user")
+        void getUserByEmail_returnsUser() {
+            when(userRepository.findByEmail("alice@example.com"))
+                    .thenReturn(Optional.of(sampleUser));
+
+            Optional<User> result = authService.getUserByEmail("alice@example.com");
+
+            assertThat(result).isPresent();
+            assertThat(result.get().getUsername()).isEqualTo("alice");
+        }
+
+        @Test
+        @DisplayName("login seeds the inactivity window via recordActivity")
+        void login_recordsActivity() {
+            when(userRepository.findByEmail("alice@example.com"))
+                    .thenReturn(Optional.of(sampleUser));
+            when(authenticationManager.authenticate(any()))
+                    .thenReturn(mock(Authentication.class));
+            when(jwtTokenProvider.generateAccessToken(any(), any(), any()))
+                    .thenReturn("access-token");
+
+            authService.login("alice@example.com", "password123");
+
+            // Login must seed the inactivity window in Redis immediately
+            verify(blacklistService).recordActivity(1L);
+        }
+    }
+}
