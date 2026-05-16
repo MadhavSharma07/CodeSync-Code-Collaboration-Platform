@@ -248,7 +248,7 @@ Before running the backend, install:
 ## 1️⃣ Clone Repository
 
 ```bash
-git clone https://github.com/your-username/codesync-backend.git
+git clone https://github.com/MadhavSharma07/codesync-backend.git
 ```
 
 ---
