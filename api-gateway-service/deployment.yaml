@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway-service
+  labels:
+    app: api-gateway-service
+    project: codesync
+spec:
+  replicas: 1
+  # Recreate: kills old pod BEFORE starting new one.
+  # Prevents the "two pods, split Eureka registrations" problem during rollouts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: api-gateway-service
+  template:
+    metadata:
+      labels:
+        app: api-gateway-service
+        project: codesync
+    spec:
+      # Give the pod 30s to deregister from Eureka before being killed
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api-gateway-service
+          image: image-registry.openshift-image-registry.svc:5000/mr-aksthegreat030420-dev/api-gateway-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: api-gateway-secrets
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 3
