@@ -1,0 +1,2 @@
+# Application properties — contains sensitive credentials (DB, JWT, OAuth secrets)
+**/application.properties

@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comment-service
+  labels:
+    app: comment-service
+    project: codesync
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: comment-service
+  template:
+    metadata:
+      labels:
+        app: comment-service
+        project: codesync
+    spec:
+      containers:
+        - name: comment-service
+          image: image-registry.openshift-image-registry.svc:5000/mr-aksthegreat030420-dev/comment-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8087
+              name: http
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: comment-service-secrets
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8087
+            initialDelaySeconds: 70
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8087
+            initialDelaySeconds: 40
+            periodSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: comment-service
+  labels:
+    app: comment-service
+    project: codesync
+spec:
+  selector:
+    app: comment-service
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8087
+      targetPort: 8087
+  type: ClusterIP
